@@ -64,5 +64,3 @@
 - The TrueNAS web UI is slow and can briefly flash the login screen while an authenticated route is loading. Do not interpret that transient screen as a lost session.
 - Never perform back-to-back TrueNAS browser actions. After every navigation, click, form entry, or submission, explicitly wait for the expected URL, text, or element to finish loading before inspecting the page or taking the next action.
 - If TrueNAS appears stuck or shows the login screen unexpectedly, refresh the current page and wait for it to settle before diagnosing a blocker. Treat authentication as lost only when the login screen persists after that refresh-and-wait check; do not ask the user to intervene for ordinary transient UI behavior.
-
-E2E sentinel instruction line.
