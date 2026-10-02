@@ -1,0 +1,4 @@
+interface:
+  display_name: "Babysit PR"
+  short_description: "Fix CI failures and squash merge a PR"
+  default_prompt: "Use $babysit to get this pull request through CI and squash merge it into main."

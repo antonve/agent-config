@@ -1,0 +1,7 @@
+interface:
+  display_name: "Implement"
+  short_description: "Sol 6 high coordination, Astra high planning"
+  default_prompt: "Use $implement with a GPT-6 Sol high main loop, GPT-6 Astra high planning, GPT-6 Sol high implementers (xhigh for complex tasks), and paired GPT-6 Astra xhigh reviewers."
+
+policy:
+  allow_implicit_invocation: false

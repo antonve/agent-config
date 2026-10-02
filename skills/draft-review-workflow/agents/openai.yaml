@@ -1,0 +1,7 @@
+interface:
+  display_name: "Draft Review Workflow"
+  short_description: "Review Draft documents or publish public previews"
+  default_prompt: "Use $draft-review-workflow to review or publicly share this Draft document."
+
+policy:
+  allow_implicit_invocation: true

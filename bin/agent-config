@@ -1,0 +1,426 @@
+#!/bin/sh
+# agent-config: install shared agent instructions and skills for Claude Code,
+# Codex, OpenCode and Cursor Agent from the agent-config repository.
+#
+# A sync fetches one commit, validates it, atomically switches the `current`
+# symlink, then links skills and writes instruction files into $HOME. It only
+# copies, links and concatenates; nothing from the fetched tree is executed.
+set -u
+
+supported_format=1
+max_instruction_bytes=32768
+marker="Managed by agent-config"
+
+usage() {
+  cat >&2 <<'EOF'
+usage:
+  agent-config sync [--once | --loop] --state DIR [options]
+  agent-config validate DIR [--reserve NAMES]
+  agent-config status --state DIR
+
+options:
+  --remote URL      repository to fetch (default: $AGENT_CONFIG_REMOTE or GitHub)
+  --branch NAME     branch to follow (default: $AGENT_CONFIG_BRANCH or main)
+  --append FILE     append FILE verbatim to every generated instruction file
+  --reserve NAMES   comma-separated skill names owned by something else
+  --adopt           replace unmanaged instruction files, keeping a
+                    <file>.pre-agent-config copy of each
+  --interval SECS   seconds between --loop syncs (default: 300)
+  --timeout SECS    bound on waiting for the lock and for the fetch (default: 30)
+EOF
+  exit 2
+}
+
+log() { printf '%s agent-config: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+
+errors=
+error() {
+  log "error: $*"
+  errors="${errors:+$errors; }$*"
+}
+
+is_reserved() {
+  case ",$reserve," in *",$1,"*) return 0 ;; esac
+  return 1
+}
+
+frontmatter_name() {
+  awk '
+    { sub(/\r$/, "") }
+    NR == 1 { if ($0 != "---") exit; next }
+    $0 == "---" { exit }
+    /^name:/ {
+      sub(/^name:[ \t]*/, "")
+      sub(/[ \t]+$/, "")
+      gsub(/^["\047]|["\047]$/, "")
+      print
+      exit
+    }
+  ' "$1"
+}
+
+# compose TREE-OR-EMPTY COMMIT: the generated instruction text.
+compose() {
+  printf '<!-- %s %s. Edit the agent-config repository instead of this file. -->\n' "$marker" "${2:-without a checkout}"
+  if [ -n "$1" ]; then
+    printf '\n'
+    cat "$1/instructions/AGENTS.md"
+  fi
+  if [ -n "$append" ]; then
+    printf '\n'
+    cat "$append"
+  fi
+}
+
+validate_tree() {
+  tree=$1
+  valid=0
+  format=$(cat "$tree/FORMAT" 2>/dev/null)
+  if [ "$format" != "$supported_format" ]; then
+    error "unsupported FORMAT '$format'; this installer supports $supported_format"
+    valid=1
+  fi
+  if [ ! -s "$tree/instructions/AGENTS.md" ]; then
+    error "instructions/AGENTS.md is missing or empty"
+    valid=1
+  fi
+  for dir in "$tree"/skills/*; do
+    [ -e "$dir" ] || [ -L "$dir" ] || continue
+    name=${dir##*/}
+    case $name in
+      '' | -* | *[!a-z0-9-]*)
+        error "skill directory '$name' must use lowercase letters, digits and hyphens"
+        valid=1
+        continue
+        ;;
+    esac
+    if [ -L "$dir" ] || [ ! -d "$dir" ]; then
+      error "skills/$name is not a directory"
+      valid=1
+    elif [ ! -f "$dir/SKILL.md" ]; then
+      error "skills/$name has no SKILL.md"
+      valid=1
+    elif [ "$(frontmatter_name "$dir/SKILL.md")" != "$name" ]; then
+      error "skills/$name/SKILL.md declares name '$(frontmatter_name "$dir/SKILL.md")'"
+      valid=1
+    fi
+    if is_reserved "$name"; then
+      error "skill '$name' is reserved on this machine"
+      valid=1
+    fi
+  done
+  if [ -s "$tree/instructions/AGENTS.md" ]; then
+    size=$(compose "$tree" 0000000000000000000000000000000000000000 | wc -c | tr -d ' ')
+    if [ "$size" -gt "$max_instruction_bytes" ]; then
+      error "composed instructions are $((size / 1024)) KiB; the limit is $((max_instruction_bytes / 1024)) KiB"
+      valid=1
+    fi
+  fi
+  return "$valid"
+}
+
+# write_managed TARGET CONTENT-FILE
+write_managed() {
+  target=$1
+  if [ -L "$target" ] || { [ -e "$target" ] && [ ! -f "$target" ]; }; then
+    error "$target is not a regular file; not replacing it"
+    return
+  fi
+  if [ -f "$target" ]; then
+    cmp -s "$2" "$target" && return
+    if ! head -n 10 "$target" | grep -q -F "$marker"; then
+      if [ "$adopt" -eq 0 ]; then
+        error "$target is not managed by agent-config; rerun with --adopt to replace it"
+        return
+      fi
+      [ -e "$target.pre-agent-config" ] || cp -p "$target" "$target.pre-agent-config" || {
+        error "could not back up $target"
+        return
+      }
+      log "adopted $target; the previous content is in $target.pre-agent-config"
+    fi
+  fi
+  target_dir=$(dirname "$target")
+  mkdir -p "$target_dir" || { error "could not create $target_dir"; return; }
+  temporary=$(mktemp "$target_dir/.agent-config.XXXXXX") || { error "could not write $target"; return; }
+  if cat "$2" >"$temporary" && chmod 0644 "$temporary" && mv -f "$temporary" "$target"; then
+    return
+  fi
+  rm -f "$temporary"
+  error "could not write $target"
+}
+
+# install_instructions TREE-OR-EMPTY COMMIT
+install_instructions() {
+  [ -n "$1" ] || [ -n "$append" ] || return 0
+  composed="$state/.tmp.composed"
+  compose "$1" "$2" >"$composed"
+  write_managed "$HOME/.claude/CLAUDE.md" "$composed"
+  write_managed "$HOME/.codex/AGENTS.md" "$composed"
+  write_managed "$HOME/.config/opencode/AGENTS.md" "$composed"
+  {
+    printf -- '---\ndescription: Global agent instructions managed by agent-config\nalwaysApply: true\n---\n\n'
+    cat "$composed"
+  } >"$composed.mdc"
+  write_managed "$HOME/.cursor/rules/agent-config.mdc" "$composed.mdc"
+  rm -f "$composed" "$composed.mdc"
+}
+
+# link_skills TREE-OR-EMPTY
+link_skills() {
+  owned="$state/current/skills/"
+  for dir in "$HOME/.claude/skills" "$HOME/.agents/skills"; do
+    mkdir -p "$dir" || { error "could not create $dir"; continue; }
+    for link in "$dir"/*; do
+      [ -L "$link" ] || continue
+      target=$(readlink "$link")
+      case $target in
+        "$owned"*)
+          name=${target#"$owned"}
+          if [ -z "$1" ] || [ "$link" != "$dir/$name" ] || [ ! -d "$1/skills/$name" ]; then
+            rm -f "$link"
+          fi
+          ;;
+      esac
+    done
+    [ -n "$1" ] || continue
+    for skill in "$1"/skills/*; do
+      [ -d "$skill" ] || continue
+      name=${skill##*/}
+      link="$dir/$name"
+      if [ -L "$link" ] && [ "$(readlink "$link")" = "$owned$name" ]; then
+        continue
+      fi
+      if [ -e "$link" ] || [ -L "$link" ]; then
+        error "$link exists and is not managed by agent-config; skipping skill '$name'"
+        continue
+      fi
+      ln -s "$owned$name" "$link" || error "could not link $link"
+    done
+  done
+}
+
+active_commit() {
+  target=$(readlink "$state/current" 2>/dev/null) || return 0
+  basename "$target"
+}
+
+swap_current() {
+  rm -f "$state/.tmp.current"
+  ln -s "checkouts/$1" "$state/.tmp.current" || return 1
+  # GNU and BusyBox spell "replace the symlink itself" -T; BSD/macOS spell it -h.
+  mv -T "$state/.tmp.current" "$state/current" 2>/dev/null ||
+    mv -h "$state/.tmp.current" "$state/current"
+}
+
+fetch() {
+  if [ ! -d "$state/repo.git" ]; then
+    git init -q --bare "$state/repo.git" || return 1
+  fi
+  GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1 GIT_HTTP_LOW_SPEED_TIME="$timeout" \
+    git --git-dir="$state/repo.git" fetch --quiet --depth 1 --no-tags \
+    "$remote" "+refs/heads/$branch:refs/heads/$branch" &
+  fetch_pid=$!
+  waited=0
+  while kill -0 "$fetch_pid" 2>/dev/null; do
+    if [ "$waited" -ge "$timeout" ]; then
+      kill "$fetch_pid" 2>/dev/null
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$fetch_pid"
+}
+
+# checkout COMMIT: extract an immutable copy of COMMIT under checkouts/.
+checkout() {
+  [ -d "$state/checkouts/$1" ] && return 0
+  extracting="$state/checkouts/.tmp.$1"
+  archive="$state/.tmp.archive.tar"
+  rm -rf "$extracting"
+  mkdir -p "$extracting" &&
+    git --git-dir="$state/repo.git" archive --format=tar -o "$archive" "$1" &&
+    tar -x -f "$archive" -C "$extracting" &&
+    rm -f "$archive" &&
+    mv "$extracting" "$state/checkouts/$1"
+}
+
+prune() {
+  active=$(active_commit)
+  kept=0
+  for name in $(ls -1t "$state/checkouts"); do
+    [ "$name" = "$active" ] && continue
+    kept=$((kept + 1))
+    [ "$kept" -le 2 ] || rm -rf "$state/checkouts/$name"
+  done
+}
+
+locked=0
+acquire_lock() {
+  waited=0
+  while ! mkdir "$state/lock" 2>/dev/null; do
+    # A sync is bounded by --timeout, so a lock this old was left by a killed run.
+    if [ -n "$(find "$state/lock" -prune -mmin +10 2>/dev/null)" ]; then
+      log "removing stale lock $state/lock"
+      rmdir "$state/lock" 2>/dev/null
+      continue
+    fi
+    if [ "$waited" -ge "$timeout" ]; then
+      error "another sync still holds the lock $state/lock"
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  locked=1
+}
+
+release_lock() {
+  if [ "$locked" -eq 1 ]; then
+    rmdir "$state/lock" 2>/dev/null
+    locked=0
+  fi
+}
+
+json_string() {
+  printf '"%s"' "$(printf '%s' "$1" | tr '\n\t' '  ' | sed 's/\\/\\\\/g; s/"/\\"/g')"
+}
+
+record_status() {
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  [ -n "$errors" ] || printf '%s\n' "$now" >"$state/last-success"
+  last_success=$(cat "$state/last-success" 2>/dev/null)
+  commit=$(active_commit)
+  {
+    printf '{\n'
+    printf '  "commit": %s,\n' "$(json_string "$commit")"
+    printf '  "remote": %s,\n' "$(json_string "$remote")"
+    printf '  "branch": %s,\n' "$(json_string "$branch")"
+    printf '  "last_attempt": %s,\n' "$(json_string "$now")"
+    printf '  "last_success": %s,\n' "$(json_string "$last_success")"
+    printf '  "error": %s\n' "$(json_string "$errors")"
+    printf '}\n'
+  } >"$state/.tmp.status.json" && mv -f "$state/.tmp.status.json" "$state/status.json"
+}
+
+sync_once() {
+  errors=
+  if ! mkdir -p "$state/checkouts"; then
+    log "error: could not create $state"
+    return 1
+  fi
+  if ! acquire_lock; then
+    record_status
+    return 1
+  fi
+  rm -rf "$state"/.tmp.* "$state"/checkouts/.tmp.*
+  before=$(active_commit)
+  if fetch; then
+    fetched=$(git --git-dir="$state/repo.git" rev-parse --verify --quiet "refs/heads/$branch^{commit}")
+    if [ -n "$fetched" ] && [ "$fetched" != "$before" ]; then
+      if ! checkout "$fetched"; then
+        error "could not extract commit $fetched"
+        rm -rf "$state/checkouts/.tmp.$fetched"
+      elif ! validate_tree "$state/checkouts/$fetched"; then
+        error "commit $fetched is invalid; keeping ${before:-no checkout}"
+        rm -rf "${state:?}/checkouts/$fetched"
+      elif swap_current "$fetched"; then
+        log "activated commit $fetched"
+      else
+        error "could not activate commit $fetched"
+      fi
+    fi
+  else
+    error "fetch from $remote failed or exceeded ${timeout}s; keeping ${before:-no checkout}"
+  fi
+  active=$(active_commit)
+  tree=
+  [ -z "$active" ] || tree="$state/checkouts/$active"
+  link_skills "$tree"
+  install_instructions "$tree" "$active"
+  prune
+  rm -f "$state"/.tmp.*
+  release_lock
+  record_status
+  [ -z "$errors" ]
+}
+
+command=${1:-}
+[ $# -eq 0 ] || shift
+mode=once
+state=
+remote=${AGENT_CONFIG_REMOTE:-https://github.com/antonve/agent-config.git}
+branch=${AGENT_CONFIG_BRANCH:-main}
+append=
+reserve=
+adopt=0
+interval=300
+timeout=30
+operand=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --once) mode=once ;;
+    --loop) mode=loop ;;
+    --adopt) adopt=1 ;;
+    --state | --remote | --branch | --append | --reserve | --interval | --timeout)
+      [ $# -ge 2 ] || usage
+      case $1 in
+        --state) state=$2 ;;
+        --remote) remote=$2 ;;
+        --branch) branch=$2 ;;
+        --append) append=$2 ;;
+        --reserve) reserve=$2 ;;
+        --interval) interval=$2 ;;
+        --timeout) timeout=$2 ;;
+      esac
+      shift
+      ;;
+    -*) usage ;;
+    *)
+      [ -z "$operand" ] || usage
+      operand=$1
+      ;;
+  esac
+  shift
+done
+
+case $command in
+  validate)
+    [ -n "$operand" ] || usage
+    validate_tree "$operand"
+    exit
+    ;;
+  status | sync)
+    case $state in
+      /*) state=${state%/} ;;
+      *)
+        echo "agent-config: --state must be an absolute path" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  *) usage ;;
+esac
+
+if [ "$command" = status ]; then
+  cat "$state/status.json"
+  exit
+fi
+
+if [ -n "$append" ] && [ ! -r "$append" ]; then
+  echo "agent-config: --append file is not readable: $append" >&2
+  exit 2
+fi
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+trap 'release_lock' EXIT
+trap 'exit 143' HUP INT TERM
+
+if [ "$mode" = once ]; then
+  sync_once
+  exit
+fi
+while :; do
+  sync_once
+  sleep "$interval"
+done
