@@ -46,9 +46,7 @@ within fifteen. New agent sessions load the change; running sessions keep what
 they loaded at start. To apply it immediately:
 
 ```sh
-agent-config sync --state /cache/agent-config \
-  --append /usr/local/share/t3-agent-instructions/storage-safety.md \
-  --reserve t3-expose-development-server          # T3
+t3-agent-config-sync --once                             # T3 (wraps agent-config sync)
 agent-config sync --state ~/.local/state/agent-config   # Mac
 agent-config status --state <state>                     # active commit, last error
 ```
@@ -72,6 +70,21 @@ AGENT_CONFIG_SHELL="bash --posix" sh test/e2e.sh # installer under another shell
 
 The harness builds throwaway homes, state directories and `file://` remotes in
 a temporary directory and never touches your real home.
+
+## Third-party skills
+
+These skills are vendored with their licences and contain no executable payload:
+
+| Skill               | Source                | Commit                                     | Licence    |
+|---------------------|-----------------------|--------------------------------------------|------------|
+| `discernment-nudge` | `anthropics/skills`   | `0a64e398ec6bb34a494f0c347e8ccae53a862f8e` | Apache-2.0 |
+| `frontend-design`   | `anthropics/skills`   | `41bbe19d1a1a7eaab5e7bb9050a417e5c6cffc8f` | Apache-2.0 |
+| `better-ui`         | `jakubkrehel/skills`  | `267330e1adfc66a718fb65fa6918c1f06d0a689e` | MIT        |
+| `emil-design-eng`   | `emilkowalski/skills` | `d23d7f88a2e21c9e4b1418c7abe420f5c1052ba7` | MIT        |
+
+`frontend-design` carries a local change: it proceeds with stated design
+assumptions when missing context is safe to infer, and asks only when a choice
+could materially change the result.
 
 ## Consumers
 

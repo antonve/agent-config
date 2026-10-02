@@ -422,5 +422,7 @@ if [ "$mode" = once ]; then
 fi
 while :; do
   sync_once
-  sleep "$interval"
+  # Wait on a background sleep so a TERM trap runs immediately, not after it.
+  sleep "$interval" &
+  wait $!
 done
