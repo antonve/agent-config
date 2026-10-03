@@ -89,7 +89,7 @@ could materially change the result.
 ## Consumers
 
 - **T3 Code** (`antonve/homelab`, `images/t3-code/`): the entrypoint runs one
-  bounded sync before T3 starts and the `agent-config-sync` sidecar repeats it
+  bounded sync before T3 starts, then leaves a background loop that repeats it
   every five minutes. The image keeps its own storage-safety block (appended
   with `--append`) and the `t3-expose-development-server` skill (`--reserve`).
 - **Mac** (`antonve/dotfiles`): Home Manager activation runs one sync and a
