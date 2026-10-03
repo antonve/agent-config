@@ -51,6 +51,10 @@
 
 - Before starting a development server, check for a healthy instance belonging to the exact project or worktree. Verify process ownership before stopping anything; never terminate processes through broad name matching. Follow the environment’s port and preview conventions.
 
+## Scratch files on T3 Code hosts
+
+- Put temporary evidence, logs, downloads and throwaway checkouts under `/workspace/.scratch/<task>` or `/cache/.scratch/<task>`, never as new top-level entries in `/workspace` or `/cache`. Entries there older than 10 days are deleted automatically, so move anything worth keeping into a repository or Draft.
+
 ## Regression evidence
 
 - When claiming a regression test fails before a fix, verify that it compiles against the pre-fix behavior and fails for the intended behavioral reason. A compiler/API mismatch or unrelated timeout is not regression evidence.
